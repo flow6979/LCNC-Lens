@@ -16,6 +16,72 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  async function getZendutyCookies(url) {
+    return new Promise((resolve) => {
+      // Open Zenduty in a background tab to trigger network request
+      chrome.tabs.create({ url: 'https://www.zenduty.com/', active: false }, (tab) => {
+        const tabId = tab.id;
+        
+        // Wait for the request to be intercepted, then close the tab and get cookies
+        setTimeout(() => {
+          chrome.tabs.remove(tabId);
+          
+          // Request cookies captured by background script
+          chrome.runtime.sendMessage({type: 'getZendutyCookies'}, (response) => {
+            if (response && response.cookieString) {
+              console.log('Total cookies captured:', response.cookieString.split('; ').length);
+              resolve({cookieString: response.cookieString, csrftoken: response.csrftoken});
+            } else {
+              resolve({cookieString: '', csrftoken: '', error: 'No cookies captured from request'});
+            }
+          });
+        }, 2000);
+      });
+    });
+  }
+
+  async function getLcncToken() {
+    return new Promise((resolve, reject) => {
+      chrome.cookies.getAll({url: 'https://low-code-preprod.bsstag.com'}, async (cookies) => {
+        try {
+          const cookiePairs = cookies.map(cookie => `${cookie.name}=${cookie.value}`);
+          const cookieString = cookiePairs.join('; ');
+          
+          const response = await fetch('https://lcnc-api-preprod.bsstag.com/api/v1/user/user-profile', {
+            method: 'GET',
+            headers: {
+              'accept': 'application/json, text/plain, */*',
+              'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+              'cookie': cookieString,
+              'origin': 'https://low-code-preprod.bsstag.com',
+              'referer': 'https://low-code-preprod.bsstag.com/',
+              'sec-fetch-dest': 'empty',
+              'sec-fetch-mode': 'cors',
+              'sec-fetch-site': 'same-site'
+            }
+          });
+          
+          if (!response.ok) {
+            reject('Failed to fetch LCNC token. Please log in to https://low-code-preprod.bsstag.com');
+            return;
+          }
+          
+          const data = await response.json();
+          const token = data?.message?.data?.attributes?.token;
+          
+          if (!token) {
+            reject('Token not found in response. Please log in to https://low-code-preprod.bsstag.com');
+            return;
+          }
+          
+          resolve({token, cookieString});
+        } catch (err) {
+          reject('Error fetching LCNC token: ' + err.message);
+        }
+      });
+    });
+  }
+
   async function getCurrentTabUrl() {
     return new Promise((resolve, reject) => {
       chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
@@ -24,25 +90,18 @@ document.addEventListener('DOMContentLoaded', async () => {
           reject('Could not get the active tab.');
           return;
         }
-        chrome.tabs.sendMessage(tabs[0].id, {type: 'getUrl'}, (response) => {
-          if (chrome.runtime.lastError) {
-            console.error('Error sending message to content script:', chrome.runtime.lastError.message);
-            reject('Could not get the page URL. Make sure you are on a Zenduty incident details page.');
-            return;
-          }
-          if (!response || !response.url) {
-            console.error('No response or missing url from content script:', response);
-            reject('Could not get the page URL. Make sure you are on a Zenduty incident details page.');
-            return;
-          }
-          resolve(response.url);
-        });
+        const url = tabs[0].url;
+        if (!url) {
+          reject('Could not get the page URL.');
+          return;
+        }
+        resolve(url);
       });
     });
   }
 
   callApiBtn.addEventListener('click', async () => {
-    responseDiv.textContent = '';
+    responseDiv.textContent = 'Loading Zenduty cookies...';
     let url = '';
     try {
       url = await getCurrentTabUrl();
@@ -64,7 +123,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       chrome.tabs.create({url: 'https://github.com/login'});
       return;
     }
-
+    // Get cookies from zenduty.com using current tab URL
+    const {cookieString: x_zenduty_auth, csrftoken, error} = await getZendutyCookies(url);
+    console.log('Zenduty Cookie String:', x_zenduty_auth);
+    console.log('Zenduty CSRF Token:', csrftoken);
+    if (error || !x_zenduty_auth) {
+      responseDiv.textContent = error || 'Zenduty cookies not found. Please reload the Zenduty incident page and wait for it to fully load.';
+      return;
+    }
+    // Get LCNC token and cookies
+    let lcncToken = '';
+    let lcncCookies = '';
+    try {
+      const lcncData = await getLcncToken();
+      lcncToken = lcncData.token;
+      lcncCookies = lcncData.cookieString;
+      console.log('LCNC Cookies:', lcncCookies);
+      console.log('LCNC Token:', lcncToken);
+    } catch (err) {
+      console.error('Login to LCNC. LCNC Token Error:', err);
+      responseDiv.textContent = err;
+      return;
+    }
     // P1. Fetch incident data
     try {
       const apiUrl = `${window.LCNC_ENV.ZENDUTY_INCIDENT_API_BASE}${incident_id}/`;
@@ -99,12 +179,27 @@ document.addEventListener('DOMContentLoaded', async () => {
         'sec-fetch-site': 'cross-site',
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
         'x-github-api-version': x_github_api_version,
-        'x_github_username': x_github_username,
-        'x_user_session': x_user_session,
-        'x_github_session': x_github_session,
-        'Content-Type': 'application/json'
+        'x-github-username': x_github_username,
+        'x-user-session': x_user_session,
+        'x-github-session': x_github_session,
+        'Content-Type': 'application/json',
+        'x-csrf-token': csrftoken,
+        'x-zenduty-auth': x_zenduty_auth,
+        'origin': 'https://lcnc-api-preprod.bsstag.com',
+        'referer': 'https://lcnc-api-preprod.bsstag.com',
+        'authorization': 'Bearer ' + lcncToken,
+        'cookie': lcncCookies
       };
-      const body = JSON.stringify({ subject, content, url });
+      const body = JSON.stringify(
+        {
+          source: "zenduty",
+          payload: { 
+            subject: subject, 
+            body: content, 
+            alertId: incident_id 
+          }
+        }
+      );
       console.log('LCNC Lens Request Headers:', headers);
       console.log('LCNC Lens Request Body:', body);
       const res = await fetch(window.LCNC_ENV.DEBUG_API_URL, {
