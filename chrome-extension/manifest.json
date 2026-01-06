@@ -3,11 +3,16 @@
   "name": "LCNC Lens",
   "version": "1.0",
   "description": "Calls the copilot API with custom headers and body.",
-  "permissions": ["storage", "cookies"],
+  "permissions": ["storage", "cookies", "tabs", "webRequest"],
   "host_permissions": [
-    "https://8ffd3ffbecfb.ngrok-free.app/*",
-    "https://github.com/*"
+    "https://github.com/*",
+    "https://www.zenduty.com/*",
+    "https://low-code-preprod.bsstag.com/*",
+    "https://lcnc-api-preprod.bsstag.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
